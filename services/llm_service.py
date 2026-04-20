@@ -1,41 +1,49 @@
 import os
 import httpx
-import json
 from fastapi import HTTPException
 
-# The Brain's Connection Details
 MISTRAL_API_BASE = "https://api.mistral.ai/v1/chat/completions"
-MISTRAL_MODEL = "mistral-small-latest" # High intelligence, low cost
+MISTRAL_MODEL = "mistral-small-latest"
 
-async def call_llm(user_content: str, system_content: str = "You are a professional Zimbabwean educator."):
+
+async def call_llm(user_content: str, system_content: str = "You are a professional Zimbabwean educator.") -> str:
+    """
+    Calls the Mistral API and returns the raw text content of the reply.
+    Forces JSON output so callers can parse structured responses reliably.
+    """
     api_key = os.getenv("MISTRAL_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="Mistral API Key not found in .env")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
-    # In the grand scheme, we force Mistral to give us JSON so the frontend doesn't break.
     payload = {
         "model": MISTRAL_MODEL,
         "messages": [
             {
-                "role": "system", 
-                # We combine your persona with the "Must return JSON" rule
-                "content": f"{system_content} Return responses ONLY in valid JSON format."
+                "role": "system",
+                "content": f"{system_content} Always return responses ONLY in valid JSON format with no markdown fences.",
             },
-            {"role": "user", "content": user_content}
+            {"role": "user", "content": user_content},
         ],
-        "response_format": {"type": "json_object"}
+        "response_format": {"type": "json_object"},
     }
 
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(MISTRAL_API_BASE, json=payload, headers=headers, timeout=45.0)
+            response = await client.post(
+                MISTRAL_API_BASE, json=payload, headers=headers, timeout=45.0
+            )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            # Extract the actual text content from the Mistral response envelope
+            return data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            print(f"Mistral HTTP error {e.response.status_code}: {e.response.text}")
+            raise HTTPException(status_code=502, detail="Failed to reach the AI Brain.")
         except Exception as e:
-            print(f"Mistral Error: {str(e)}")
+            print(f"Mistral error: {str(e)}")
             raise HTTPException(status_code=502, detail="Failed to reach the AI Brain.")
