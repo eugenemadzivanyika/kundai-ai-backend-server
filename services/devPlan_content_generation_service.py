@@ -57,38 +57,42 @@ async def generate_personalized_theory(payload: dict) -> dict:
 
 # --- 2. PRACTICE (Focuses on Hints and Step-by-Step) ---
 async def generate_practice_set(payload: dict) -> dict:
-    attr = payload.get("attribute_details", {})
-    misconceptions = payload.get("misconceptions", [])
+    profile = payload.get("profile", {})
+    deficiencies = profile.get("deficiencies", [])
     
-    system_prompt = """You are KUNDAI, a supportive ZIMSEC Mathematics Coach. 
-    Provide step-by-step guidance and localized hints (e.g., tuckshop context). 
-    Focus on building muscle memory. 
+    # We pull the attribute name from the first deficiency to keep the title relevant
+    main_topic = deficiencies[0].get('attributeName', 'Mathematics') if deficiencies else "Mathematics"
     
-    SURGICAL INSTRUCTION: If 'misconceptions' are provided, design the 'hints' 
-    and 'steps' to specifically steer the student away from those exact errors."""
-
-    gap_context = f"\nTARGET GAPS: {', '.join(misconceptions)}" if misconceptions else ""
+    system_prompt = """You are KUNDAI's Practice Engine.
+    Generate practice problems where the 'hints' are specifically designed to 
+    stop the student from making the logical errors identified in their profile.
+    
+    The 'steps' should provide a ZIMSEC-aligned walkthrough."""
 
     user_prompt = f"""
-    Topic: {attr.get('name')} ({attr.get('level')})
-    {gap_context}
+    TARGET DEFICIENCIES: {json.dumps(deficiencies)}
     
-    Goal: Generate 5 localized practice problems. 
-    Ensure the 'hint' for at least 2 problems directly addresses the identified misconceptions.
-    
+    TASK: Generate 5 localized practice problems.
+    For each problem, include:
+    1. A 'hint' that addresses the specific misconception.
+    2. A 'tutor_explanation' for the hint (what the coach says if they ask 'Why that hint?')
+    3. Step-by-step solution logic.
+
     STRICT JSON SCHEMA:
     {{
-      "title": "Surgical Practice: {attr.get('name')}",
+      "title": "Surgical Practice: {main_topic}",
       "problems": [
         {{
-          "question": "...",
-          "hint": "...",
+          "question": "The problem text",
+          "hint": "The student-facing hint",
+          "tutor_explanation": "Internal logic for the AI coach about this hint",
           "steps": ["Step 1...", "Step 2..."],
-          "final_answer": "..."
+          "final_answer": "The final result"
         }}
       ]
     }}
     """
+    
     response = await call_llm(user_prompt, system_content=system_prompt)
     return parse_json_from_ai(response)
 

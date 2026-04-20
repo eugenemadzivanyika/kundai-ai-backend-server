@@ -52,6 +52,54 @@ async def grade_student_work(payload: dict) -> dict:
     response = await call_llm(user_prompt, system_content=system_prompt)
     return parse_json_from_ai(response)
 
+async def build_cognitive_profile(payload: dict, grading_output: dict) -> dict:
+    """
+    Analyzes student logic using full text context and attribute names.
+    """
+    formatted_work = payload.get("content", "")
+    # This is where we ensure the AI knows the specific attributes involved
+    # We expect Node.js to pass: rubric: { "attributes": [{"id": "...", "name": "..."}] }
+    rubric = payload.get("rubric", {})
+    attribute_context = rubric.get("attributeContext", "No specific attribute names provided")
+
+    system_prompt = """You are an Educational Psychologist and ZIMSEC Curriculum Expert.
+    Your task is to build a 'Cognitive Profile' that maps student logic to Syllabus Attributes.
+    
+    CRITICAL INSTRUCTION: Use the human-readable Attribute Names provided in the context.
+    Do not just return IDs; explain the 'Cognitive Gap' in relation to the topic name."""
+
+    user_prompt = f"""
+    --- SYLLABUS CONTEXT ---
+    Target Attributes for this paper: {attribute_context}
+    
+    --- STUDENT WORK ---
+    {formatted_work}
+    
+    --- INITIAL GRADING FEEDBACK ---
+    Feedback: {grading_output.get('feedback')}
+    Errors found: {grading_output.get('misconceptionsFound')}
+    
+    --- TASK ---
+    Return a JSON object exactly like this:
+    {{
+      "strengths": [
+        {{ "attributeId": "The ID", "attributeName": "The Name", "evidence": "Why they are good at this" }}
+      ],
+      "deficiencies": [
+        {{ 
+          "attributeId": "The ID", 
+          "attributeName": "The Name",
+          "misconception": "Short label of the error", 
+          "failedLogic": "Deep dive into the student's wrong logic path" 
+        }}
+      ],
+      "suggestedTutorApproach": "One sentence strategy for the AI Coach"
+    }}
+    """
+    
+    response = await call_llm(user_prompt, system_content=system_prompt)
+    return parse_json_from_ai(response)
+
 def parse_json_from_ai(response):
     try:
         content = response['choices'][0]['message']['content']

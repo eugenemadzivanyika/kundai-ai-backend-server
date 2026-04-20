@@ -1,25 +1,32 @@
 from fastapi import APIRouter, HTTPException
-from services.asag_service import grade_student_work
+# Import both functions
+from services.asag_service import grade_student_work, build_cognitive_profile
 
-# We use the /asag prefix to match your Node.js axios calls
 router = APIRouter(
     prefix="/asag",
     tags=["Automated Student Answer Grading"]
 )
 
 @router.post("/grade")
-async def perform_grading(payload: dict):
+async def perform_grading_and_profiling(payload: dict):
     """
-    Endpoint to trigger Chain-of-Thought AI grading for subjective work.
-    Expects: content (student text), rubric (question + keywords), studentContext.
+    Sequentially triggers Grading (Scoring) then Profiling (Understanding).
     """
     try:
-        # This calls the service that uses the ZIMSEC Moderator persona
-        result = await grade_student_work(payload)
-        return result
+        # STEP 1: Get the score and basic feedback
+        grading_result = await grade_student_work(payload)
+        
+        # STEP 2: Pass the original payload AND the grading result to the profiler
+        cognitive_profile = await build_cognitive_profile(payload, grading_result)
+        
+        # STEP 3: Return a unified object for the Node.js backend
+        return {
+            "grading": grading_result,
+            "profile": cognitive_profile
+        }
     except Exception as e:
-        print(f"[GRADING ROUTE ERROR]: {str(e)}")
+        print(f"[PIPELINE ERROR]: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"AI Grading failed: {str(e)}"
+            detail=f"AI Pipeline failed: {str(e)}"
         )

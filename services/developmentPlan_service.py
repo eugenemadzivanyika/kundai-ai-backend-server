@@ -1,45 +1,52 @@
+from services.asag_service import parse_json_from_ai
 from services.llm_service import call_llm
 import json
 
 async def generate_surgical_missions(payload: dict) -> dict:
-    attr = payload.get("attribute_details", {})
-    mastery = payload.get("initial_mastery", 0.1)
+    profile = payload.get("profile", {})
+    strengths = profile.get("strengths", [])
+    deficiencies = profile.get("deficiencies", [])
     
-    # We define the KUNDAI persona to ensure the tone is supportive yet rigorous
-    system_prompt = (
-        "You are KUNDAI, an expert ZIMSEC Mathematics tutor. Your goal is to create a "
-        "remediation path for a student struggling with a specific skill."
-    )
+    system_prompt = """You are KUNDAI, a High-Performance ZIMSEC Math Coach.
+    Your goal is to build a 'Surgical Remediation Path' based on a student's cognitive profile.
     
+    You must generate 3 distinct Missions. 
+    Mission 1 (Knowledge) MUST use the student's STRENGTHS to bridge into their GAPS.
+    Mission 2 (Practice) MUST address the specific logic errors found in the profile.
+    Mission 3 (Mastery) MUST be a final ZIMSEC-style evaluation.
+    
+    Each mission needs 'steps'. Every step must have an 'exitCheckpoint' question.
+    The AI Coach will use these to verify understanding before unlocking the next step."""
+
     user_prompt = f"""
-    You are KUNDAI, an expert ZIMSEC Mathematics tutor.
-    Topic: {attr.get('name')} ({attr.get('attribute_id')})
-    Level: {attr.get('level')}
-    Description: {attr.get('description')}
-    Prerequisites: {attr.get('prerequisites')}
+    STUDENT COGNITIVE PROFILE:
+    Strengths: {json.dumps(strengths)}
+    Deficiencies: {json.dumps(deficiencies)}
 
-    The student has a mastery level of {mastery:.2f}. Generate 3 distinct 'missions':
-    1. Review (Knowledge) - Focus on: {attr.get('name')}
-    2. Practice (Application) - Based on: {attr.get('description')}
-    3. Assessment (Evaluation) - ZIMSEC Standard.
-
-    Format the output as a JSON object with a 'missions' key containing an array of objects.
-    Each object must have:
-    - "task": A clear, actionable title for the student.
-    - "objective": The learning goal (e.g., 'Mastering HCF concepts').
-    - "status": Always set to 'Pending'.
+    TASK: Generate 3 Missions with granular steps and checkpoints.
+    CRITICAL: Step types must ONLY be one of: "Theory", "Interactive_Exercise", or "Hinted_Practice".
+    
+    OUTPUT FORMAT (EXACT JSON):
+    {{
+      "missions": [
+        {{
+          "task": "Mission Title",
+          "objective": "High-level goal",
+          "steps": [
+            {{
+              "title": "Step Title",
+              "content": "What the AI Coach should explain to the student",
+              "type": "Theory", <-- MUST be Theory, Interactive_Exercise, or Hinted_Practice
+              "exitCheckpoint": {{
+                "question": "A specific question the Coach asks the student in chat",
+                "expectedLogic": "The specific reasoning the Coach is looking for"
+              }}
+            }}
+          ]
+        }}
+      ]
+    }}
     """
 
-    # Call the Mistral Brain
     response = await call_llm(user_content=user_prompt, system_content=system_prompt) 
-    
-    try:
-        # Mistral sometimes wraps JSON in markdown blocks; we strip those if present
-        content = response['choices'][0]['message']['content']
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-        
-        return json.loads(content)
-    except Exception as e:
-        print(f"Parsing Error: {e}")
-        return {"missions": [], "error": "AI response was not valid JSON"}
+    return parse_json_from_ai(response)
