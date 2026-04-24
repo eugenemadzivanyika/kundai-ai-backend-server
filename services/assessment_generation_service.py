@@ -2,16 +2,16 @@ from services.llm_service import call_llm
 import json
 import re
 
-def parse_json_from_ai(response):
+def parse_json_from_ai(response: str):
+    # call_llm already extracts the content string from the API envelope
     try:
-        content = response['choices'][0]['message']['content']
-        match = re.search(r'(\{.*\}|\[.*\])', content, re.DOTALL)
+        match = re.search(r'(\{.*\}|\[.*\])', response, re.DOTALL)
         if match:
             return json.loads(match.group(0))
-        return json.loads(content)
+        return json.loads(response)
     except Exception as e:
         print(f"Extraction Error: {e}")
-        return {"error": "Invalid AI JSON", "raw": content if 'content' in locals() else str(e)}
+        return {"error": "Invalid AI JSON", "raw": response}
 
 async def generate_syllabus_questions(payload: dict) -> dict:
     # 1. UNPACK THE NEW CONTEXT FIELDS

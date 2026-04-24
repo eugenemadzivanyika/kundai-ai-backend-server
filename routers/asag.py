@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
-# Import both functions
 from services.asag_service import grade_student_work, build_cognitive_profile
+from utils.logger import log_error
 
 router = APIRouter(
     prefix="/asag",
@@ -25,7 +25,7 @@ async def perform_grading_and_profiling(payload: dict):
             "profile": cognitive_profile
         }
     except Exception as e:
-        print(f"[PIPELINE ERROR]: {str(e)}")
+        log_error(f"POST /asag/grade - {e}", body=payload)
         raise HTTPException(
             status_code=500,
             detail=f"AI Pipeline failed: {str(e)}"

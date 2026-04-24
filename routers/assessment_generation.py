@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from services.assessment_generation_service import generate_syllabus_questions
+from utils.logger import log_error
 
 router = APIRouter(
     prefix="/assessment-gen", 
@@ -17,8 +18,8 @@ async def create_assessment(payload: dict):
         # name, attribute_id, level, description, prerequisites
         return await generate_syllabus_questions(payload)
     except Exception as e:
-        print(f"[ASSESSMENT ROUTE ERROR]: {str(e)}")
+        log_error(f"POST /assessment-gen/generate - {e}", body=payload)
         raise HTTPException(
-            status_code=500, 
+            status_code=500,
             detail=f"Failed to generate assessment: {str(e)}"
         )

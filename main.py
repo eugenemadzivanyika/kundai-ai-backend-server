@@ -5,6 +5,7 @@ from routers import bkt, developmentPlan, devplan_content_generation, health, oc
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from middleware.error_middleware import ErrorLoggingMiddleware
 load_dotenv()  # This must run before routers are included
 
 # List the origins you trust
@@ -19,6 +20,7 @@ app = FastAPI(
     description="FastAPI service for AI/ML endpoints.",
 )
 
+app.add_middleware(ErrorLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
