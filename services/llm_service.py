@@ -30,6 +30,7 @@ async def call_llm(user_content: str, system_content: str = "You are a professio
             {"role": "user", "content": user_content},
         ],
         "response_format": {"type": "json_object"},
+        "max_tokens": 32768,
     }
 
     async with httpx.AsyncClient() as client:

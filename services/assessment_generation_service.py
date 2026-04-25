@@ -2,16 +2,92 @@ from services.llm_service import call_llm
 import json
 import re
 
+def _fix_invalid_json_escapes(s: str) -> str:
+    """
+    Mistral sometimes emits bare LaTeX backslashes (e.g. \leq, \geq) that are
+    invalid JSON escape sequences.  This pass doubles every backslash that is
+    NOT followed by a recognised JSON escape character so that json.loads()
+    can succeed.  Valid sequences kept as-is: \" \\ \/ \b \f \n \r \t \\uXXXX
+    """
+    valid = {'"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'}
+    out = []
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch == '\\' and i + 1 < len(s):
+            nxt = s[i + 1]
+            if nxt in valid:
+                out.append('\\')
+                out.append(nxt)
+                i += 2
+                if nxt == 'u':          # keep the 4 hex digits verbatim
+                    out.append(s[i:i + 4])
+                    i += 4
+            else:
+                out.append('\\\\')      # escape the rogue backslash
+                out.append(nxt)
+                i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return ''.join(out)
+
+
+def _rescue_truncated_json(text: str) -> dict | None:
+    """
+    When the model output is cut off mid-question (token limit hit), try to recover
+    all *complete* questions by closing the JSON array at the last clean boundary.
+    A clean boundary is a position where three consecutive closing braces appear —
+    these close the innermost value, solution_schema, and the question object itself.
+    """
+    arr_m = re.search(r'"questions"\s*:\s*\[', text)
+    if not arr_m:
+        return None
+
+    name_m = re.search(r'"assessment_name"\s*:\s*"([^"]*)"', text)
+    prefix = f'{{"assessment_name": "{name_m.group(1) if name_m else "Assessment"}", "questions": ['
+
+    # Collect every position that ends with }}} — a likely question boundary
+    candidate_ends = [m.end() for m in re.finditer(r'\}\s*\}\s*\}', text[arr_m.start():])]
+
+    for offset in reversed(candidate_ends):
+        attempt = text[arr_m.start(): arr_m.start() + offset] + '\n  ]\n}'
+        for payload in [attempt, _fix_invalid_json_escapes(attempt)]:
+            try:
+                result = json.loads(payload)
+                if isinstance(result.get('questions'), list) and result['questions']:
+                    print(f"[rescue] recovered {len(result['questions'])} question(s) from truncated response")
+                    return result
+            except Exception:
+                continue
+
+    return None
+
+
 def parse_json_from_ai(response: str):
     # call_llm already extracts the content string from the API envelope
-    try:
-        match = re.search(r'(\{.*\}|\[.*\])', response, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        return json.loads(response)
-    except Exception as e:
-        print(f"Extraction Error: {e}")
-        return {"error": "Invalid AI JSON", "raw": response}
+    candidates = [response]
+
+    # Also try with invalid escape sequences repaired (catches bare \leq, \geq, etc.)
+    fixed = _fix_invalid_json_escapes(response)
+    if fixed != response:
+        candidates.append(fixed)
+
+    for text in candidates:
+        try:
+            match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
+            payload = match.group(0) if match else text
+            return json.loads(payload)
+        except Exception:
+            continue
+
+    # Last resort: the response was likely truncated — recover whatever complete questions exist
+    rescued = _rescue_truncated_json(response)
+    if rescued:
+        return rescued
+
+    print(f"Extraction Error: could not parse AI response after escape repair and rescue")
+    return {"error": "Invalid AI JSON", "raw": response}
 
 DIFFICULTY_GUIDE = {
     "easy": {
@@ -165,7 +241,7 @@ async def generate_syllabus_questions(payload: dict) -> dict:
           "questionText": "string",
           "questionType": "{allowed_types_str}",
           "options": {{ "A": "str", "B": "str", "C": "str", "D": "str" }},
-          "correctAnswer": "MUST be a plain string — NEVER an object or array. For multi-part questions write all parts in one string separated by semicolons, e.g. '(a) 45 000 m²; (b) 115 hours; (c) 0° 30\\''",
+          "correctAnswer": "MUST be a plain string — NEVER an object or array. For multi-part questions write all parts in one string separated by semicolons, e.g. '(a) 45 000 m²; (b) 115 hours; (c) 0 degrees 30 minutes'",
           "points": number,
           "difficulty": "{difficulty}",
           "explanation": "string",
@@ -182,6 +258,7 @@ async def generate_syllabus_questions(payload: dict) -> dict:
     - If questionType is 'short_answer' or 'essay', set options to an empty object {{}}.
     - For multi-part answers, concatenate parts with semicolons in one string.
     - Use LaTeX notation for all mathematical expressions (e.g. $\\\\frac{{1}}{{2}}$, $x^2$).
+    - CRITICAL — LaTeX in JSON requires double backslashes. EVERY LaTeX command backslash MUST be doubled: write $\\\\leq$ not $\\leq$, $\\\\geq$ not $\\geq$, $\\\\times$ not $\\times$, $\\\\frac{{a}}{{b}}$ not $\\frac{{a}}{{b}}$. A single backslash before a letter is invalid JSON and will break parsing.
     """
 
     response = await call_llm(user_prompt, system_content=system_prompt)
