@@ -22,6 +22,7 @@ class StepData(BaseModel):
 class CognitiveProfile(BaseModel):
     strengths: Optional[List[Dict]] = []
     deficiencies: Optional[List[Dict]] = []
+    suggestedTutorApproach: Optional[str] = None
 
 
 class CoachingContext(BaseModel):
@@ -36,6 +37,23 @@ class CoachingRequest(BaseModel):
     message: str
     history: List[Dict] = []
     context: CoachingContext
+
+
+class IntroductionRequest(BaseModel):
+    profile: CognitiveProfile
+    plan: Dict  # { missions: [{ task, objective, steps: [{ title, type, ... }] }] }
+
+
+@router.post("/introduce")
+async def get_plan_introduction(payload: IntroductionRequest):
+    try:
+        result = await ai_tutor_service.generate_plan_introduction(
+            profile=payload.profile.dict(),
+            plan=payload.plan,
+        )
+        return result  # { "introduction": "..." }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/coaching")
