@@ -238,25 +238,44 @@ async def generate_syllabus_questions(payload: dict) -> dict:
       "questions": [
         {{
           "primaryAttributeId": "string (MUST match the OBJECTIVE ID used)",
-          "questionText": "string",
+          "questionText": "string — for multipart questions this is the shared context/stem only (e.g. 'The diagram shows triangle ABC where...'). For single questions this is the full question.",
           "questionType": "{allowed_types_str}",
           "options": {{ "A": "str", "B": "str", "C": "str", "D": "str" }},
-          "correctAnswer": "MUST be a plain string — NEVER an object or array. For multi-part questions write all parts in one string separated by semicolons, e.g. '(a) 45 000 m²; (b) 115 hours; (c) 0 degrees 30 minutes'",
-          "points": number,
+          "correctAnswer": "MUST be a plain string. Use ONLY for single (non-multipart) questions. Set to empty string '' when parts is non-empty.",
+          "points": "number — TOTAL marks for this question. MUST equal sum of part maxPoints when parts is non-empty.",
           "difficulty": "{difficulty}",
           "explanation": "string",
           "solution_schema": {{
             "steps": ["string — one working step per element"],
-            "final_answer": "MUST be a plain string — same rule as correctAnswer above"
-          }}
+            "final_answer": "string — set to empty string '' when parts is non-empty"
+          }},
+          "parts": [
+            {{
+              "text": "string — the specific sub-question text e.g. '(a) Calculate the area of the triangle.'",
+              "type": "short_answer | essay | multiple_choice | true_false",
+              "options": [],
+              "correctAnswer": "string — the model answer for THIS part only",
+              "maxPoints": "number — marks for this part only",
+              "solution_schema": {{
+                "steps": ["string"],
+                "final_answer": "string"
+              }}
+            }}
+          ]
         }}
       ]
     }}
 
-    RULES:
-    - correctAnswer and solution_schema.final_answer are ALWAYS plain strings, never JSON objects.
-    - If questionType is 'short_answer' or 'essay', set options to an empty object {{}}.
-    - For multi-part answers, concatenate parts with semicolons in one string.
+    MULTIPART RULES:
+    - Use parts[] ONLY for structured questions that naturally split into labelled sub-tasks (a), (b), (c).
+    - When parts[] is non-empty: correctAnswer on the parent MUST be "", points MUST equal sum(part.maxPoints).
+    - When parts[] is empty []: correctAnswer on the parent MUST be filled — this is a single question.
+    - USE parts for: Paper 2 essay/structured questions, multi-step calculation problems with distinct sub-tasks, questions that award marks per sub-part.
+    - DO NOT USE parts for: multiple_choice, true_false, or any question answerable in a single response.
+
+    OTHER RULES:
+    - correctAnswer and solution_schema.final_answer are ALWAYS plain strings, never JSON objects or arrays.
+    - If questionType is 'short_answer' or 'essay' with no parts, set options to an empty object {{}}.
     - Use LaTeX notation for all mathematical expressions (e.g. $\\\\frac{{1}}{{2}}$, $x^2$).
     - CRITICAL — LaTeX in JSON requires double backslashes. EVERY LaTeX command backslash MUST be doubled: write $\\\\leq$ not $\\leq$, $\\\\geq$ not $\\geq$, $\\\\times$ not $\\times$, $\\\\frac{{a}}{{b}}$ not $\\frac{{a}}{{b}}$. A single backslash before a letter is invalid JSON and will break parsing.
     """
