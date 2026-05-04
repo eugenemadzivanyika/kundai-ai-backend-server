@@ -1,9 +1,10 @@
 import os
 import tempfile
+from typing import List
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from services.gemini_ocr_service import perform_gemini_ocr
+from services.gemini_ocr_service import perform_gemini_ocr, perform_gemini_ocr_batch
 from services.ocr_service import perform_ocr
 
 router = APIRouter(prefix="/ocr", tags=["ocr"])
@@ -42,3 +43,41 @@ async def extract_text(file: UploadFile = File(...)):
             pass
 
     return result
+
+
+@router.post("/extract-batch")
+async def extract_text_batch(files: List[UploadFile] = File(...)):
+    """Accept multiple images/PDFs and transcribe them all in one Gemini call."""
+    for f in files:
+        mime = f.content_type or "application/octet-stream"
+        if mime not in ALLOWED_TYPES:
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported file type: {mime}. Accepted: images and PDF.",
+            )
+
+    uploads = [
+        (await f.read(), f.content_type or "image/jpeg", f.filename or "upload")
+        for f in files
+    ]
+
+    if os.getenv("GEMINI_API_KEY"):
+        return await perform_gemini_ocr_batch(uploads)
+
+    # Fallback: run each file individually through the non-Gemini OCR service
+    results = []
+    for content, mime, filename in uploads:
+        suffix = os.path.splitext(filename)[1] or ".bin"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            r = await perform_ocr(tmp_path, mime)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        results.append(r)
+
+    return {"files": results}

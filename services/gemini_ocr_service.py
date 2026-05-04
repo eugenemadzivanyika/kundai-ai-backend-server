@@ -4,17 +4,16 @@ import io
 import os
 import re
 import uuid
-
 from fastapi import HTTPException
 from utils.logger import log_error, log_info
-
 from services.ocr_service import _line_confidence
 
 GEMINI_MODEL = "gemini-3-flash-preview"
 
+# --- UPDATED PROMPT INSTRUCTIONS ---
 _SHARED_RULES = """\
 You are a forensic transcription tool for handwritten mathematics assignments.
-Reproduce exactly what is physically written — faithful to the student's own work and errors.
+Reproduce exactly what is physically written — faithful to the student's own work.
 
 OUTPUT FORMAT — you must use these conventions:
 - Wrap every mathematical expression in LaTeX delimiters:
@@ -29,17 +28,15 @@ OUTPUT FORMAT — you must use these conventions:
     • Exponents written as superscripts → ^ (e.g. a^2)
     • Square root sign → \\sqrt{...}
     • ≠ → \\ne       |  ≈ → \\approx
-- If the student crossed out or cancelled anything (words OR math), wrap it in ~~...~~
-    e.g.  ~~$5x + y$~~   or   ~~wrong word~~
-- If a symbol or word is completely illegible, write [illegible] at that position.
+- LAYOUT QUIRKS: If a number is deliberately circled in the working (like in HCF/LCM problems), indicate that by placing the number in parentheses and adding a brief italicized note if necessary.
 - Preserve the student's own question numbering and layout using indentation and blank lines.
 
+
 STRICT RULES — do not break these:
-- Do NOT correct the student's mathematical errors — if their algebra is wrong, transcribe it wrong.
-- Do NOT add steps, headings, commentary, labels, or any text not physically visible.
-- Do NOT reorder or restructure anything.
-- Do NOT infer or complete missing working.
-Output ONLY the transcription. No preamble, no sign-off.\
+- NO ADDITIONS: Do NOT add any conversational filler, missing steps, commentary, labels, or text that you do not explicitly see in the images. Transcribe *only* what is there.
+- DO NOT CORRECT: Do NOT correct the student's mathematical errors — if their algebra is wrong, transcribe it wrong.
+- DO NOT REORDER: Maintain exact numerical order of the questions. Do NOT reorder or restructure anything.
+- Output ONLY the transcription. No preamble, no sign-off.\
 """
 
 TRANSCRIPTION_PROMPT = _SHARED_RULES
@@ -48,12 +45,12 @@ BATCH_PROMPT = (
     _SHARED_RULES
     + "\n\n"
     "You are given multiple images, each being one page of the same assignment. "
-    "Transcribe each page in order.\n\n"
+    "Combine the context and transcribe each page in chronological order, following the numbering from the student.\n\n"
     "Begin each page's transcription with ===PAGE_N=== on its own line "
     "(N is the 1-based page number).\n"
     "Example:\n===PAGE_1===\n<transcription>\n===PAGE_2===\n<transcription>"
 )
-
+# -----------------------------------
 
 MAX_IMAGE_SIDE = 1600  # px — beyond this offers no OCR quality gain but balloons base64 payload
 
@@ -84,6 +81,25 @@ def _pdf_to_jpeg_pages(file_path: str) -> list[tuple[bytes, int, int]]:
         import pypdfium2 as pdfium
 
         pdf = pdfium.PdfDocument(file_path)
+        pages = []
+        for i in range(len(pdf)):
+            page = pdf[i]
+            bitmap = page.render(scale=2.0)
+            pil_img = bitmap.to_pil()
+            buf = io.BytesIO()
+            pil_img.save(buf, format="JPEG", quality=90)
+            pages.append((buf.getvalue(), pil_img.width, pil_img.height))
+        return pages
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PDF → image conversion failed: {exc}")
+
+
+def _pdf_bytes_to_jpeg_pages(content: bytes) -> list[tuple[bytes, int, int]]:
+    """Same as _pdf_to_jpeg_pages but accepts raw bytes instead of a file path."""
+    try:
+        import pypdfium2 as pdfium
+
+        pdf = pdfium.PdfDocument(content)
         pages = []
         for i in range(len(pdf)):
             page = pdf[i]
@@ -237,3 +253,71 @@ async def perform_gemini_ocr(file_path: str, mime_type: str = "image/jpeg") -> d
 
     log_info("Gemini OCR complete", pages=len(result_pages))
     return {"pages": result_pages}
+
+
+async def perform_gemini_ocr_batch(
+    upload_files: list[tuple[bytes, str, str]],
+) -> dict:
+    """
+    Transcribe multiple files (images or PDFs) in a single Gemini batch call.
+
+    Args:
+        upload_files: list of (content_bytes, mime_type, filename)
+
+    Returns:
+        { "files": [{ "pages": [BackendOcrPage, ...] }, ...] }
+        One entry per input file, in the same order.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured.")
+
+    try:
+        from google import genai
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="google-genai package is not installed. Run: pip install google-genai",
+        )
+
+    client = genai.Client(api_key=api_key)
+
+    # Expand every input file into individual page images.
+    # Track (image_bytes, mime, file_index, page_within_file, width, height).
+    all_pages: list[tuple[bytes, str, int, int, int, int]] = []
+
+    for fi, (content, mime, _) in enumerate(upload_files):
+        if mime == "application/pdf":
+            pdf_pages = _pdf_bytes_to_jpeg_pages(content)
+            for pi, (img_bytes, w, h) in enumerate(pdf_pages):
+                all_pages.append((img_bytes, "image/jpeg", fi, pi, w, h))
+        else:
+            w, h = 0, 0
+            try:
+                from PIL import Image as PILImage
+                pil = PILImage.open(io.BytesIO(content))
+                w, h = pil.width, pil.height
+            except Exception:
+                pass
+            all_pages.append((content, mime, fi, 0, w, h))
+
+    log_info("Sending all pages in one Gemini batch call", total_pages=len(all_pages), files=len(upload_files))
+
+    # One Gemini call for everything.
+    page_inputs = [(img, mime) for img, mime, _, _, _, _ in all_pages]
+    transcriptions = await _call_gemini_batch(client, page_inputs)
+
+    # Reassemble results grouped by original file index.
+    file_results: list[list] = [[] for _ in upload_files]
+    for i, (_, _, fi, within_pi, w, h) in enumerate(all_pages):
+        markdown = transcriptions[i] if i < len(transcriptions) else ""
+        file_results[fi].append({
+            "page_number": within_pi + 1,
+            "width": w,
+            "height": h,
+            "raw_markdown": markdown,
+            "regions": _build_regions(markdown, within_pi),
+        })
+
+    log_info("Gemini batch OCR complete", files=len(file_results))
+    return {"files": [{"pages": pages} for pages in file_results]}
