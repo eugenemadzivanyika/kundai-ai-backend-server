@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import os
 import re
 import uuid
@@ -255,8 +256,89 @@ async def perform_gemini_ocr(file_path: str, mime_type: str = "image/jpeg") -> d
     return {"pages": result_pages}
 
 
+def _build_question_aware_prompt(questions: list) -> str:
+    """Build the Gemini prompt that asks for both a faithful transcription and
+    a structured answer mapping keyed by question ID."""
+    q_lines = []
+    for i, q in enumerate(questions, start=1):
+        qid   = q.get("id", "")
+        parts = q.get("parts", [])
+        if parts:
+            labels = ", ".join(chr(97 + j) for j in range(len(parts)))
+            q_lines.append(f"Q{i} [ID:{qid}] — {len(parts)}-part question (parts: {labels})")
+        else:
+            q_lines.append(f"Q{i} [ID:{qid}] — single-answer question")
+
+    return (
+        _SHARED_RULES
+        + "\n\n"
+        "ASSESSMENT STRUCTURE — map the student's work to these questions:\n"
+        + "\n".join(q_lines)
+        + "\n\n"
+        "You are given multiple images of the same student assignment. "
+        "Transcribe each page faithfully AND map every answer block to its question.\n\n"
+        "Return ONLY valid JSON — no markdown fences, no preamble:\n"
+        "{\n"
+        '  "pages": [\n'
+        '    {"page": 1, "transcription": "<full faithful LaTeX transcription of page 1>"},\n'
+        '    {"page": 2, "transcription": "<full faithful LaTeX transcription of page 2>"}\n'
+        "  ],\n"
+        '  "answers": [\n'
+        "    {\n"
+        '      "questionId": "<exact ID from ASSESSMENT STRUCTURE>",\n'
+        '      "studentAnswer": "<full answer if no parts, else empty string>",\n'
+        '      "partAnswers": ["<part a answer>", "<part b answer>"]  // empty array [] if no parts\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "MAPPING RULES:\n"
+        "- One answers entry per question in order, even if not attempted (use empty strings).\n"
+        "- For multi-part questions split by part labels (a, b, c…) visible in the work;\n"
+        "  content before the first part label belongs to part a.\n"
+        "- Do NOT include question numbers or part labels in the answer text itself.\n"
+        "- Do NOT include page headers or separators in answer text.\n"
+        "- Apply the same LaTeX conventions defined above in all answer text."
+    )
+
+
+async def _call_gemini_batch_qa(
+    client,
+    pages: list[tuple[bytes, str]],
+    questions: list,
+) -> dict | None:
+    """Send all pages + question structure in one Gemini call.
+    Returns parsed dict {"pages": [...], "answers": [...]} or None if the
+    response cannot be parsed as JSON (caller falls back to plain batch).
+    """
+    resized = [_resize_for_gemini(img) for img, _ in pages]
+    parts   = [
+        {"inline_data": {"mime_type": mime, "data": base64.b64encode(img).decode()}}
+        for img, mime in resized
+    ]
+    parts.append({"text": _build_question_aware_prompt(questions)})
+
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=GEMINI_MODEL,
+            contents=[{"parts": parts}],
+        )
+        raw = response.text or ""
+        log_info("Gemini QA batch response", pages=len(pages), chars=len(raw))
+        # Strip optional markdown code fences Gemini sometimes wraps around JSON
+        clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.DOTALL)
+        return json.loads(clean)
+    except (json.JSONDecodeError, ValueError) as exc:
+        log_error("Gemini QA response not valid JSON — falling back to plain batch", error=str(exc))
+        return None
+    except Exception as exc:
+        log_error("Gemini QA batch API error", error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Gemini QA batch call failed: {exc}")
+
+
 async def perform_gemini_ocr_batch(
     upload_files: list[tuple[bytes, str, str]],
+    questions: list | None = None,
 ) -> dict:
     """
     Transcribe multiple files (images or PDFs) in a single Gemini batch call.
@@ -301,13 +383,35 @@ async def perform_gemini_ocr_batch(
                 pass
             all_pages.append((content, mime, fi, 0, w, h))
 
+    page_inputs = [(img, mime) for img, mime, _, _, _, _ in all_pages]
     log_info("Sending all pages in one Gemini batch call", total_pages=len(all_pages), files=len(upload_files))
 
-    # One Gemini call for everything.
-    page_inputs = [(img, mime) for img, mime, _, _, _, _ in all_pages]
+    # ── Question-aware path ───────────────────────────────────────────────────────
+    if questions:
+        log_info("Attempting question-aware OCR", questions=len(questions))
+        qa = await _call_gemini_batch_qa(client, page_inputs, questions)
+        if qa is not None:
+            qa_pages = qa.get("pages", [])
+            file_results: list[list] = [[] for _ in upload_files]
+            for i, (_, _, fi, within_pi, w, h) in enumerate(all_pages):
+                md = qa_pages[i].get("transcription", "") if i < len(qa_pages) else ""
+                file_results[fi].append({
+                    "page_number": within_pi + 1,
+                    "width":       w,
+                    "height":      h,
+                    "raw_markdown": md,
+                    "regions":     _build_regions(md, within_pi),
+                })
+            log_info("Question-aware OCR complete", files=len(file_results), answers=len(qa.get("answers", [])))
+            return {
+                "files":   [{"pages": pgs} for pgs in file_results],
+                "answers": qa.get("answers", []),
+            }
+        log_info("QA JSON parse failed — falling back to plain batch OCR")
+
+    # ── Plain batch path (no questions, or QA fallback) ───────────────────────────
     transcriptions = await _call_gemini_batch(client, page_inputs)
 
-    # Reassemble results grouped by original file index.
     file_results: list[list] = [[] for _ in upload_files]
     for i, (_, _, fi, within_pi, w, h) in enumerate(all_pages):
         markdown = transcriptions[i] if i < len(transcriptions) else ""

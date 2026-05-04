@@ -1,8 +1,9 @@
+import json
 import os
 import tempfile
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from services.gemini_ocr_service import perform_gemini_ocr, perform_gemini_ocr_batch
 from services.ocr_service import perform_ocr
@@ -46,8 +47,13 @@ async def extract_text(file: UploadFile = File(...)):
 
 
 @router.post("/extract-batch")
-async def extract_text_batch(files: List[UploadFile] = File(...)):
-    """Accept multiple images/PDFs and transcribe them all in one Gemini call."""
+async def extract_text_batch(
+    files: List[UploadFile] = File(...),
+    questions: Optional[str] = Form(None),
+):
+    """Accept multiple images/PDFs and transcribe them all in one Gemini call.
+    Optionally accepts a JSON-serialised questions array for question-aware mapping.
+    """
     for f in files:
         mime = f.content_type or "application/octet-stream"
         if mime not in ALLOWED_TYPES:
@@ -61,8 +67,15 @@ async def extract_text_batch(files: List[UploadFile] = File(...)):
         for f in files
     ]
 
+    parsed_questions: Optional[list] = None
+    if questions:
+        try:
+            parsed_questions = json.loads(questions)
+        except json.JSONDecodeError:
+            pass  # bad JSON — proceed without question-aware mapping
+
     if os.getenv("GEMINI_API_KEY"):
-        return await perform_gemini_ocr_batch(uploads)
+        return await perform_gemini_ocr_batch(uploads, parsed_questions)
 
     # Fallback: run each file individually through the non-Gemini OCR service
     results = []
