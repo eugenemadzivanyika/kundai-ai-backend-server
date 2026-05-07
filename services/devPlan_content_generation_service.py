@@ -1,8 +1,11 @@
 # from click import prompt
 from services.llm_service import call_llm
 from services import rag_service
+import asyncio
 import json
+import random
 import re
+
 
 def parse_json_from_ai(response):
     """
@@ -31,6 +34,9 @@ def parse_json_from_ai(response):
     except Exception as e:
         print(f"Extraction Error: {e}")
         return {"error": "Invalid AI JSON", "raw": content if 'content' in locals() else str(e)}
+
+
+# ─── 1. PERSONALIZED THEORY ──────────────────────────────────────────────────
 
 async def generate_personalized_theory(payload: dict) -> dict:
     attr = payload.get("attribute_details", {})
@@ -89,7 +95,9 @@ documents are silent.
     response = await call_llm(user_prompt, system_content=system_prompt)
     return parse_json_from_ai(response)
 
-# --- 2. PRACTICE (Focuses on Hints and Step-by-Step) ---
+
+# ─── 2. PRACTICE (Focuses on Hints and Step-by-Step) ─────────────────────────
+
 async def generate_practice_set(payload: dict) -> dict:
     profile = payload.get("profile", {})
     deficiencies = profile.get("deficiencies", [])
@@ -141,6 +149,9 @@ async def generate_practice_set(payload: dict) -> dict:
 
     response = await call_llm(user_prompt, system_content=system_prompt)
     return parse_json_from_ai(response)
+
+
+# ─── 3. MASTERY QUIZ ─────────────────────────────────────────────────────────
 
 async def generate_mastery_quiz(payload: dict) -> dict:
     attr = payload.get("attribute_details", {})
@@ -194,10 +205,7 @@ async def generate_mastery_quiz(payload: dict) -> dict:
     return parse_json_from_ai(response)
 
 
-# ─── UNIT / SUBJECT CHALLENGE GENERATION ─────────────────────────────────────
-# Called by the student-facing challenge feature in StudentSubjectsView.
-# Accepts a list of CourseAttribute objects for a unit and returns practice
-# questions in the PracticeQuestion shape the frontend expects.
+# ─── 4. UNIT / SUBJECT CHALLENGE ─────────────────────────────────────────────
 
 async def generate_unit_challenge(payload: dict) -> dict:
     """
@@ -266,3 +274,117 @@ correctOptionIndex is the 0-based index into the options array (0=A, 1=B, 2=C, 3
 
     response = await call_llm(user_prompt, system_content=system_prompt)
     return parse_json_from_ai(response)
+
+
+# ─── 5. PERSONALISED SUBJECT CHALLENGE (Phase 3) ─────────────────────────────
+
+async def generate_subject_challenge(payload: dict) -> dict:
+    """
+    Generates a personalised subject-level challenge weighted toward the student's
+    weakest attributes.
+
+    payload:
+      subject_id       - MongoDB _id of the course (used for RAG)
+      subject_name     - display name
+      student_attrs    - list of {name, attribute_id, description, mastery}
+                         where mastery is a float 0–1 from StudentAttribute.currentMastery
+      count            - total questions to generate (default 12)
+      difficulty       - 'easy' | 'medium' | 'hard' (default 'medium')
+
+    Returns:
+      { title, questions: [{id, prompt, options, correctOptionIndex, explanation}],
+        weak_topic_count: int }
+    """
+    subject_id   = payload.get("subject_id")
+    subject_name = payload.get("subject_name", "the subject")
+    attrs        = payload.get("student_attrs", [])
+    count        = int(payload.get("count", 12))
+    difficulty   = payload.get("difficulty", "medium")
+
+    if not attrs:
+        return {
+            "title": f"{subject_name} Challenge",
+            "questions": [],
+            "weak_topic_count": 0,
+            "error": "No attributes provided",
+        }
+
+    # ── Allocate questions: bottom 40 % of attrs (by mastery) get 60 % of questions ──
+    sorted_attrs = sorted(attrs, key=lambda a: float(a.get("mastery", 0)))
+
+    split       = max(1, len(sorted_attrs) * 4 // 10)
+    weak_attrs  = sorted_attrs[:split]
+    other_attrs = sorted_attrs[split:]
+
+    weak_count  = min(count, round(count * 0.6))
+    other_count = count - weak_count
+
+    # ── Inner helper: generate n questions for a given attr subset ──
+    async def _gen(attr_list: list, n: int) -> list:
+        if not attr_list or n == 0:
+            return []
+
+        rag_query = " ".join(a.get("name", "") for a in attr_list[:3])
+        if subject_id:
+            rag_result = await rag_service.query_rag(
+                subject_id, rag_query, n_results=4, document_type="learning_material"
+            )
+        else:
+            rag_result = {"chunks": [], "has_documents": False}
+        rag_block = rag_service.format_rag_context(rag_result)
+
+        attr_lines = [
+            f"- {a.get('name', 'Topic')} (mastery {round(float(a.get('mastery', 0)) * 100)}%)"
+            for a in attr_list
+        ]
+
+        system_prompt = (
+            f"You are KUNDAI creating a personalised challenge for a student.\n"
+            f"Generate {n} multiple-choice questions on: "
+            f"{', '.join(a.get('name', '') for a in attr_list)}.\n"
+            f"Use Zimbabwean context (names like Farai/Chipo, ZiG currency, local places).\n"
+            f"Difficulty: {difficulty}. Each question has exactly 4 options (A–D), one correct."
+        )
+
+        user_prompt = f"""SUBJECT: {subject_name}
+TOPICS (with student mastery):
+{chr(10).join(attr_lines)}
+
+CURRICULUM GROUNDING:
+{rag_block if rag_block else "Use ZIMSEC knowledge — no documents uploaded for this subject."}
+
+Return ONLY this JSON:
+{{
+  "questions": [
+    {{
+      "id": "q1",
+      "prompt": "...",
+      "options": ["A text", "B text", "C text", "D text"],
+      "correctOptionIndex": 0,
+      "explanation": "..."
+    }}
+  ]
+}}"""
+
+        raw    = await call_llm(user_prompt, system_content=system_prompt)
+        parsed = parse_json_from_ai(raw)
+        return parsed.get("questions", [])
+
+    # ── Run both batches in parallel ──
+    weak_qs, other_qs = await asyncio.gather(
+        _gen(weak_attrs, weak_count),
+        _gen(other_attrs, other_count),
+    )
+
+    all_questions = (weak_qs + other_qs)[:count]
+    random.shuffle(all_questions)
+
+    # Re-index question ids after shuffle so they are sequential
+    for i, q in enumerate(all_questions, start=1):
+        q["id"] = f"q{i}"
+
+    return {
+        "title": f"{subject_name} — Personalised Challenge",
+        "questions": all_questions,
+        "weak_topic_count": len(weak_attrs),
+    }

@@ -10,11 +10,19 @@ async def call_llm(
     user_content: str,
     system_content: str = "You are a professional Zimbabwean educator.",
     json_mode: bool = True,
+    history: list[dict] | None = None,
 ) -> str:
     """
     Calls the Mistral API and returns the raw text content of the reply.
-    When json_mode=True (default), forces JSON output so callers can parse structured responses.
-    When json_mode=False, returns free-form text (e.g. Markdown).
+
+    Args:
+        user_content:   The latest user message.
+        system_content: System-level instruction for the model.
+        json_mode:      When True (default), forces JSON output.
+                        When False, returns free-form text (e.g. Markdown).
+        history:        Optional prior turns as [{role, content}] dicts.
+                        Inserted between the system message and the current
+                        user message so multi-turn chat works correctly.
     """
     api_key = os.getenv("MISTRAL_API_KEY")
     if not api_key:
@@ -31,12 +39,21 @@ async def call_llm(
         else system_content
     )
 
-    payload = {
+    messages: list[dict] = [{"role": "system", "content": system_instruction}]
+
+    # Inject prior conversation turns so the model has context
+    if history:
+        for turn in history:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+    messages.append({"role": "user", "content": user_content})
+
+    payload: dict = {
         "model": MISTRAL_MODEL,
-        "messages": [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": user_content},
-        ],
+        "messages": messages,
         "max_tokens": 32768,
     }
     if json_mode:
