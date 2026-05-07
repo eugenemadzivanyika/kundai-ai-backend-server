@@ -27,3 +27,6 @@ python-multipart==0.0.22
 starlette==0.41.3
 typing_extensions==4.15.0
 uvicorn==0.30.6
+chromadb
+pymupdf
+pypdf

@@ -1,5 +1,6 @@
 from typing import Dict, List, Optional
 from services.llm_service import call_llm
+from services import rag_service
 import json
 import re
 
@@ -15,6 +16,7 @@ class AiTutorService:
         message: str,
         history: List[Dict],
         context: Dict,
+        subject_id: Optional[str] = None,
     ) -> Dict:
         step_data   = context.get("step_data") or {}
         profile     = context.get("profile")   or {}
@@ -25,6 +27,17 @@ class AiTutorService:
         checkpoint     = step_data.get("exitCheckpoint") or {}
         expected_logic = checkpoint.get("expectedLogic", "")
         step_content   = step_data.get("content", "")
+
+        if subject_id:
+            rag_result = await rag_service.query_rag(
+                subject_id,
+                f"{current_step} {goal}",
+                n_results=5,
+                document_type="learning_material",
+            )
+        else:
+            rag_result = {"chunks": [], "sources": [], "distances": [], "has_documents": False}
+        rag_context_block = rag_service.format_rag_context(rag_result)
 
         strengths             = profile.get("strengths", [])
         deficiencies          = profile.get("deficiencies", [])
@@ -113,7 +126,7 @@ Step: "{current_step}"
 Overall Goal: "{goal}"
 
 Learning Material:
-{step_content if step_content else "(No specific content — infer from the step title and ZIMSEC Mathematics Syllabus B curriculum.)"}
+{(rag_context_block + ("\n\nSupplementary Notes:\n" + step_content if step_content else "")) if rag_context_block else (step_content if step_content else "(No documents uploaded for this subject — use your ZIMSEC curriculum knowledge.)")}
 
 Exit Checkpoint — what this student must demonstrate before moving on:
 "{expected_logic if expected_logic else 'A clear, correct explanation and application of the concept.'}"
@@ -170,6 +183,7 @@ STRICT OUTPUT — return ONLY this JSON object, no markdown wrappers, no extra k
         self,
         profile: Dict,
         plan: Dict,
+        subject_id: Optional[str] = None,
     ) -> Dict:
         """
         Called once when a student is first assigned a development plan.
@@ -208,6 +222,15 @@ STRICT OUTPUT — return ONLY this JSON object, no markdown wrappers, no extra k
 
         # Final learning outcome = last mission's objective
         final_outcome = missions[-1].get("objective", "") if missions else ""
+
+        if subject_id and gap_names:
+            query = " ".join(gap_names[:3])
+            intro_rag = await rag_service.query_rag(
+                subject_id, query, n_results=5, document_type="learning_material"
+            )
+        else:
+            intro_rag = {"chunks": [], "sources": [], "distances": [], "has_documents": False}
+        intro_rag_block = rag_service.format_rag_context(intro_rag)
 
         system_prompt = """
 You are KUNDAI, a warm and rigorous ZIMSEC tutor for Zimbabwean secondary school students.
@@ -263,6 +286,11 @@ INSTRUCTIONS:
 - NEVER mention attribute codes, IDs, or any internal system references (e.g. MATH-F1-ALG-08).
   Use only the human-readable concept names provided above.
 """
+
+        if intro_rag_block:
+            user_prompt += f"\n\nCURRICULUM CONTEXT FOR THIS PLAN:\n{intro_rag_block}"
+        else:
+            user_prompt += "\n\nCURRICULUM CONTEXT FOR THIS PLAN:\n(Use your ZIMSEC knowledge for this subject.)"
 
         raw = await call_llm(user_content=user_prompt, system_content=system_prompt)
         return {"introduction": self._ensure_plain_text(raw)}

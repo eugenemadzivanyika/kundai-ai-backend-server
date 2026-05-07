@@ -1,5 +1,6 @@
 # from click import prompt
 from services.llm_service import call_llm
+from services import rag_service
 import json
 import re
 
@@ -34,20 +35,34 @@ def parse_json_from_ai(response):
 async def generate_personalized_theory(payload: dict) -> dict:
     attr = payload.get("attribute_details", {})
     mastery = payload.get("initial_mastery", 0.1)
-    # NEW: Capture the specific misconceptions found during grading
     misconceptions = payload.get("misconceptions", [])
-    
-    system_prompt = """You are KundAI, an expert ZIMSEC tutor. 
-    Your goal is to explain complex math concepts using relatable Zimbabwean scenarios 
-    (like Kombi fares, tuckshop profit, or market prices). 
-    
-    SURGICAL INSTRUCTION: If 'misconceptions' are provided, start the module by 
-    gently addressing these specific errors. Use the 'Aha!' moment technique to 
+    subject_id = payload.get("subject_id")
+
+    if subject_id:
+        rag_result = await rag_service.query_rag(
+            subject_id,
+            f"{attr.get('name', '')} {attr.get('description', '')}",
+            n_results=4,
+            document_type="learning_material",
+        )
+    else:
+        rag_result = {"chunks": [], "sources": [], "distances": [], "has_documents": False}
+    rag_context_block = rag_service.format_rag_context(rag_result)
+
+    system_prompt = """You are KundAI, an expert ZIMSEC tutor.
+    Your goal is to explain complex math concepts using relatable Zimbabwean scenarios
+    (like Kombi fares, tuckshop profit, or market prices).
+
+    SURGICAL INSTRUCTION: If 'misconceptions' are provided, start the module by
+    gently addressing these specific errors. Use the 'Aha!' moment technique to
     show why the previous logic was a common pitfall.
-    
+
+    If CURRICULUM GROUNDING is provided, base your examples, figures, and explanations \
+on it as your primary source. Supplement with your own ZIMSEC knowledge only where the \
+documents are silent.
+
     Always use Markdown for formatting. Include 2 Checkpoint questions."""
 
-    # We build a specific string to highlight the gaps if they exist
     gap_context = ""
     if misconceptions:
         gap_context = f"\nRECENT ERRORS IDENTIFIED: {', '.join(misconceptions)}"
@@ -60,14 +75,17 @@ async def generate_personalized_theory(payload: dict) -> dict:
     Student Mastery: {mastery:.2f}
     {gap_context}
 
-    TASK: Generate a 'Mini-Module' theory block. 
+    TASK: Generate a 'Mini-Module' theory block.
     1. Address the specific identified misconceptions first.
     2. Use a relatable Zim context (e.g., measuring a round vegetable garden or a soccer center circle).
     3. Explain how this builds on prerequisites.
-    
+
+    CURRICULUM GROUNDING:
+    {rag_context_block if rag_context_block else "Use your ZIMSEC knowledge — no curriculum documents uploaded for this subject."}
+
     Return JSON format: {{ "title": "...", "content": "..." }}
     """
-    
+
     response = await call_llm(user_prompt, system_content=system_prompt)
     return parse_json_from_ai(response)
 
@@ -75,24 +93,36 @@ async def generate_personalized_theory(payload: dict) -> dict:
 async def generate_practice_set(payload: dict) -> dict:
     profile = payload.get("profile", {})
     deficiencies = profile.get("deficiencies", [])
-    
-    # We pull the attribute name from the first deficiency to keep the title relevant
+    subject_id = payload.get("subject_id")
+
     main_topic = deficiencies[0].get('attributeName', 'Mathematics') if deficiencies else "Mathematics"
-    
+
+    if subject_id:
+        query = " ".join(d.get("attributeName", "") for d in deficiencies[:3] if d.get("attributeName"))
+        rag_result = await rag_service.query_rag(
+            subject_id, query or main_topic, n_results=4, document_type="learning_material"
+        )
+    else:
+        rag_result = {"chunks": [], "sources": [], "distances": [], "has_documents": False}
+    rag_context_block = rag_service.format_rag_context(rag_result)
+
     system_prompt = """You are KUNDAI's Practice Engine.
-    Generate practice problems where the 'hints' are specifically designed to 
+    Generate practice problems where the 'hints' are specifically designed to
     stop the student from making the logical errors identified in their profile.
-    
+
     The 'steps' should provide a ZIMSEC-aligned walkthrough."""
 
     user_prompt = f"""
     TARGET DEFICIENCIES: {json.dumps(deficiencies)}
-    
+
     TASK: Generate 5 localized practice problems.
     For each problem, include:
     1. A 'hint' that addresses the specific misconception.
     2. A 'tutor_explanation' for the hint (what the coach says if they ask 'Why that hint?')
     3. Step-by-step solution logic.
+
+    CURRICULUM GROUNDING:
+    {rag_context_block if rag_context_block else "Use your ZIMSEC knowledge — no curriculum documents uploaded for this subject."}
 
     STRICT JSON SCHEMA:
     {{
@@ -108,19 +138,31 @@ async def generate_practice_set(payload: dict) -> dict:
       ]
     }}
     """
-    
+
     response = await call_llm(user_prompt, system_content=system_prompt)
     return parse_json_from_ai(response)
 
 async def generate_mastery_quiz(payload: dict) -> dict:
     attr = payload.get("attribute_details", {})
     misconceptions = payload.get("misconceptions", [])
-    
-    system_prompt = """You are KUNDAI, a strict ZIMSEC Examiner. 
-    Create rigorous multiple-choice questions that mimic the Paper 1 style. 
-    
-    SURGICAL INSTRUCTION: If 'misconceptions' are provided, at least one 'distractor' 
-    (wrong option) per question MUST be the result of that specific misconception. 
+    subject_id = payload.get("subject_id")
+
+    if subject_id:
+        rag_result = await rag_service.query_rag(
+            subject_id,
+            f"{attr.get('name', '')} {attr.get('description', '')}",
+            n_results=4,
+            document_type="learning_material",
+        )
+    else:
+        rag_result = {"chunks": [], "sources": [], "distances": [], "has_documents": False}
+    rag_context_block = rag_service.format_rag_context(rag_result)
+
+    system_prompt = """You are KUNDAI, a strict ZIMSEC Examiner.
+    Create rigorous multiple-choice questions that mimic the Paper 1 style.
+
+    SURGICAL INSTRUCTION: If 'misconceptions' are provided, at least one 'distractor'
+    (wrong option) per question MUST be the result of that specific misconception.
     The 'explanation' should explain why that specific distractor is a trap."""
 
     gap_context = f"\nPAST MISCONCEPTIONS: {', '.join(misconceptions)}" if misconceptions else ""
@@ -128,10 +170,13 @@ async def generate_mastery_quiz(payload: dict) -> dict:
     user_prompt = f"""
     Topic: {attr.get('name')} | Level: {attr.get('level')}
     {gap_context}
-    
-    Task: Create a 5-question Multiple Choice Quiz. 
+
+    Task: Create a 5-question Multiple Choice Quiz.
     Include traps based on the listed misconceptions.
-    
+
+    CURRICULUM GROUNDING:
+    {rag_context_block if rag_context_block else "Use your ZIMSEC knowledge — no curriculum documents uploaded for this subject."}
+
     STRICT JSON SCHEMA:
     {{
       "title": "Mastery Check: {attr.get('name')}",
@@ -168,14 +213,23 @@ async def generate_unit_challenge(payload: dict) -> dict:
     subject_name = payload.get("subject_name", "Mathematics")
     count        = payload.get("count", 10)
     difficulty   = payload.get("difficulty", "medium")
+    subject_id   = payload.get("subject_id")
 
-    # Build a compact summary of what each attribute covers
     attr_lines = []
     for a in attributes:
         attr_lines.append(
             f"- {a.get('name', 'Topic')} ({a.get('attribute_id', '')}): {a.get('description', '')}"
         )
     attr_summary = "\n".join(attr_lines) if attr_lines else f"General {unit_title} content"
+
+    if subject_id:
+        query = f"{unit_title} {subject_name}"
+        rag_result = await rag_service.query_rag(
+            subject_id, query, n_results=4, document_type="learning_material"
+        )
+    else:
+        rag_result = {"chunks": [], "sources": [], "distances": [], "has_documents": False}
+    rag_context_block = rag_service.format_rag_context(rag_result)
 
     system_prompt = f"""You are KUNDAI, a ZIMSEC Mathematics tutor creating a unit challenge for students.
 Generate {count} multiple-choice questions covering the unit: "{unit_title}" from {subject_name}.
@@ -187,6 +241,9 @@ Each question must have exactly 4 options (A, B, C, D) with one correct answer."
 UNIT: {unit_title}
 ATTRIBUTES COVERED:
 {attr_summary}
+
+CURRICULUM GROUNDING:
+{rag_context_block if rag_context_block else "Use your ZIMSEC knowledge — no curriculum documents uploaded for this subject."}
 
 Generate exactly {count} multiple-choice questions spread across these attributes.
 

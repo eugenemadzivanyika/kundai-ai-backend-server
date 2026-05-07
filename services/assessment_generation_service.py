@@ -1,4 +1,5 @@
 from services.llm_service import call_llm
+from services import rag_service
 import json
 import re
 
@@ -171,6 +172,7 @@ async def generate_syllabus_questions(payload: dict) -> dict:
     distribution      = payload.get("distribution", {})
     math_paper_type   = payload.get("math_paper_type")  # "paper1" | "paper2" | "both" | None
     rag_context_block = payload.get("rag_context_block")  # pre-formatted style guide from Node RAG layer
+    subject_id        = payload.get("subject_id")
 
     # 2. DIFFICULTY & PAPER STYLE CONTEXT
     diff_guide   = DIFFICULTY_GUIDE.get(difficulty, DIFFICULTY_GUIDE["medium"])
@@ -186,8 +188,25 @@ async def generate_syllabus_questions(payload: dict) -> dict:
         if paper_style else ""
     )
 
-    # 3. RAG STYLE GUIDE BLOCK (injected verbatim when available)
+    # 3. MongoDB QuestionBank RAG style guide (injected verbatim when available)
     rag_block = f"\n\n{rag_context_block}" if rag_context_block else ""
+
+    # 3b. ChromaDB question paper RAG (from teacher-uploaded PDFs)
+    doc_rag_block = ""
+    if subject_id:
+        query = " ".join(a.get("name", "") for a in context[:3] if a.get("name"))
+        if query:
+            doc_rag = await rag_service.query_rag(
+                subject_id, query, n_results=6, document_type="question_paper"
+            )
+            doc_rag_block = rag_service.format_rag_context(doc_rag)
+
+    uploaded_examples_block = (
+        f"\n\nUPLOADED PAST PAPER EXAMPLES (from teacher-uploaded PDFs):\n"
+        f"{doc_rag_block}\n"
+        f"Use these examples alongside the style guide above when constructing questions."
+        if doc_rag_block else ""
+    )
 
     # 4. SYSTEM PERSONA
     system_prompt = f"""You are a Senior ZIMSEC Examination Officer for Mathematics Syllabus B.
@@ -197,7 +216,7 @@ async def generate_syllabus_questions(payload: dict) -> dict:
     - Target Level: {meta.get('level', 'General ZIMSEC')}
     - Teacher Constraints: {meta.get('description', 'Standard ZIMSEC assessment.')}
     - Localization: Use Zimbabwean names (Farai, Chipo), locations (Gweru, Bindura), and ZiG currency.
-    - Tone: Formal, rigorous ZIMSEC examination tone (4008/4028 standard).{difficulty_block}{paper_style_block}{rag_block}"""
+    - Tone: Formal, rigorous ZIMSEC examination tone (4008/4028 standard).{difficulty_block}{paper_style_block}{rag_block}{uploaded_examples_block}"""
 
     # 5. TYPE MIX CALCULATION
     allowed_types = [q_type for q_type, pct in distribution.items() if pct > 0]

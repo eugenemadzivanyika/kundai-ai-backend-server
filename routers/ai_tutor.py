@@ -37,11 +37,13 @@ class CoachingRequest(BaseModel):
     message: str
     history: List[Dict] = []
     context: CoachingContext
+    subject_id: Optional[str] = None
 
 
 class IntroductionRequest(BaseModel):
     profile: CognitiveProfile
     plan: Dict  # { missions: [{ task, objective, steps: [{ title, type, ... }] }] }
+    subject_id: Optional[str] = None
 
 
 @router.post("/introduce")
@@ -50,6 +52,7 @@ async def get_plan_introduction(payload: IntroductionRequest):
         result = await ai_tutor_service.generate_plan_introduction(
             profile=payload.profile.dict(),
             plan=payload.plan,
+            subject_id=payload.subject_id,
         )
         return result  # { "introduction": "..." }
     except Exception as e:
@@ -63,6 +66,7 @@ async def get_coaching(payload: CoachingRequest):
             message=payload.message,
             history=payload.history,
             context=payload.context.dict(),
+            subject_id=payload.subject_id,
         )
         return result  # { "guidance": "...", "checkpointPassed": bool }
     except Exception as e:

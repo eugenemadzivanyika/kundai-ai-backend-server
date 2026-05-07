@@ -1,115 +1,121 @@
-# zivAI AI Services Backend (FastAPI)
+# KundAI AI Services Backend
 
-This service will host AI/ML endpoints for zivAI (question generation, grading, OCR orchestration, recommendations). It is scaffolded with FastAPI and stub routes to be implemented once models are ready.
+Python / FastAPI service providing AI and ML endpoints for the KundAI platform. Runs independently of the main Node.js backend and is called directly by the React frontend and the Node.js server.
+
+## Default port: 8000
+
+---
 
 ## Project structure
-- `main.py` — central FastAPI app, router registration
-- `routers/` — API route modules
-- `services/` — business logic functions used by routers
-- `requirements.txt` — Python dependencies
-- `.env.example` — example port/CORS configuration
 
-## Dedicated port
-Default port for this service is **8001**. You can override it with:
 ```
-AI_SERVICE_PORT=8001
+kundai-ai-services-backend/
+├── main.py                  # FastAPI app entry point, router registration
+├── requirements.txt
+├── routers/                 # Route modules
+│   ├── health.py
+│   ├── ocr.py
+│   ├── asag.py
+│   ├── bkt.py
+│   ├── agents.py
+│   ├── developmentPlan.py
+│   ├── devplan_content_generation.py
+│   ├── assessment_generation.py
+│   ├── ai_tutor.py
+│   ├── content.py
+│   └── resources.py
+├── services/                # Business logic used by routers
+│   ├── gemini_ocr_service.py
+│   ├── ocr_service.py
+│   ├── asag_service.py
+│   ├── bkt_service.py
+│   ├── agents_service.py
+│   ├── developmentPlan_service.py
+│   ├── devPlan_content_generation_service.py
+│   ├── assessment_generation_service.py
+│   ├── ai_tutor_service.py
+│   ├── content_service.py
+│   ├── llm_service.py
+│   ├── storage_service.py
+│   └── health_service.py
+├── middleware/
+│   └── error_middleware.py
+├── utils/
+│   └── logger.py
+└── uploads/                 # Temp storage for uploaded files during processing
 ```
 
-## CORS configuration
-Allowed origins are controlled via `ALLOWED_ORIGINS` (comma-separated).
-Example:
-```
-ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
-```
+---
 
-## API documentation (Swagger / OpenAPI)
-FastAPI auto-generates API docs:
-- **Swagger UI**: `http://localhost:8001/docs`
-- **ReDoc**: `http://localhost:8001/redoc`
-- **OpenAPI JSON**: `http://localhost:8001/openapi.json`
+## Endpoints
 
-## Setup (local)
-Prerequisites:
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Service health check |
+| `POST` | `/ocr/extract` | OCR on uploaded image or PDF (Gemini Vision + Tesseract) |
+| `POST` | `/asag/grade` | Automated Short Answer Grading |
+| `POST` | `/bkt/update` | Bayesian Knowledge Tracing — update student knowledge state |
+| `POST` | `/development-plan/generate` | Generate a personalised student development plan |
+| `POST` | `/devplan-content/generate` | Generate content for development plan steps |
+| `POST` | `/assessment/generate` | Generate assessment questions from syllabus topics |
+| `POST` | `/ai-tutor/chat` | AI tutor conversational endpoint |
+| `POST` | `/agents/route` | Multi-agent routing |
+| `POST` | `/content/generate` | Lesson notes and study content generation |
+| `GET` | `/resources` | Resource listing |
+
+Static uploads served at `/uploads`.
+
+---
+
+## Setup
+
+**Prerequisites**
 - Python 3.10+
+- Tesseract OCR installed on the system:
+  ```bash
+  sudo apt install tesseract-ocr        # Ubuntu/Debian
+  brew install tesseract                # macOS
+  ```
+- Google Gemini API key
 
-1) **Create a virtual environment**
+**Install**
 ```bash
-cd ai-services-backend
-python3 -m venv .venv
-```
-
-2) **Activate the virtual environment**
-```bash
-# Linux/macOS
-source .venv/bin/activate
-
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-```
-
-3) **Install dependencies**
-```bash
+cd kundai-ai-services-backend
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-4) **Run the service**
-```bash
-# Linux/macOS
-AI_SERVICE_PORT=8001 uvicorn main:app --reload --host 0.0.0.0 --port ${AI_SERVICE_PORT}
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-# Windows PowerShell
-$env:AI_SERVICE_PORT=8001
-uvicorn main:app --reload --host 0.0.0.0 --port $env:AI_SERVICE_PORT
+**Environment variables** — create a `.env` file:
+```env
+GEMINI_API_KEY=your-gemini-api-key
+AI_SERVICE_PORT=8000
+ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
+
+**Run (development)**
+```bash
+source venv/bin/activate
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+---
+
+## API documentation
+
+FastAPI auto-generates interactive docs while the service is running:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+- OpenAPI JSON: `http://localhost:8000/openapi.json`
+
+---
 
 ## Health check
-- `GET /health`
 
-Example:
 ```bash
-curl http://localhost:8001/health
+curl http://localhost:8000/health
 ```
 
-Response:
 ```json
-{"status":"ok","service":"ai-services-backend"}
+{"status": "ok", "service": "kundai-ai-services-backend"}
 ```
-
-## Service modules (stubs)
-These are placeholder modules to be implemented when models are available:
-
-- **OCR**
-  - Router: `routers/ocr.py`
-  - Service: `services/ocr_service.py`
-  - Endpoint: `POST /ocr/extract`
-
-- **ASAG (Automated Short Answer Grading)**
-  - Router: `routers/asag.py`
-  - Service: `services/asag_service.py`
-  - Endpoint: `POST /asag/grade`
-
-- **DKT (Deep Knowledge Tracing)**
-  - Router: `routers/dkt.py`
-  - Service: `services/dkt_service.py`
-  - Endpoint: `POST /dkt/update`
-
-- **Agents Router**
-  - Router: `routers/agents.py`
-  - Service: `services/agents_service.py`
-  - Endpoint: `POST /agents/route`
-
-- **Recommendations**
-  - Router: `routers/recommendations.py`
-  - Service: `services/recommendations_service.py`
-  - Endpoint: `POST /recommendations/generate`
-
-- **Content Generation** (lesson plans, notes, question variants)
-  - Router: `routers/content.py`
-  - Service: `services/content_service.py`
-  - Endpoint: `POST /content/generate`
-
-## Next steps
-- Replace stub service logic with real model calls.
-- Add request/response schemas (Pydantic models).
-- Wire model configs and credentials via environment variables.
