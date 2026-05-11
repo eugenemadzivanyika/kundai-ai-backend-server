@@ -1,7 +1,7 @@
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import bkt, developmentPlan, devplan_content_generation, health, ocr, asag, agents, content, resources, assessment_generation, ai_tutor, syllabus_extraction, rag, notes, persisted_notes
+from routers import bkt, developmentPlan, devplan_content_generation, health, ocr, asag, agents, content, resources, assessment_generation, ai_tutor, syllabus_extraction, rag, notes, persisted_notes, reteach
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -44,4 +44,5 @@ app.include_router(syllabus_extraction.router)
 app.include_router(rag.router)
 app.include_router(notes.router)
 app.include_router(persisted_notes.router)
+app.include_router(reteach.router)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
