@@ -8,7 +8,10 @@ async def grade_student_work(payload: dict) -> dict:
     Accepts a `questions` array (preferred) or falls back to legacy flat `content`.
     """
     questions = payload.get("questions", [])
-    rubric = payload.get("rubric", {})
+    raw_rubric = payload.get("rubric", {})
+    # rubric may arrive as a list (per-question objects) or a dict (legacy metadata)
+    rubric_list = raw_rubric if isinstance(raw_rubric, list) else []
+    rubric = raw_rubric if isinstance(raw_rubric, dict) else {}
     student_context = payload.get("studentContext", {})
 
     system_prompt = """You are a Senior ZIMSEC Moderator for Mathematics.
@@ -36,10 +39,14 @@ async def grade_student_work(payload: dict) -> dict:
         total_marks = sum(q.get('maxPoints', 1) for q in questions)
         question_count = len(questions)
     else:
-        # Legacy fallback
+        # Legacy fallback — build from flat content + rubric list if available
         questions_block = payload.get("content", "")
-        total_marks = rubric.get('maxMarks', 10)
-        question_count = 1
+        if rubric_list:
+            total_marks = sum(q.get('maxMarks', q.get('maxPoints', 1)) for q in rubric_list)
+            question_count = len(rubric_list)
+        else:
+            total_marks = rubric.get('maxMarks', 10)
+            question_count = 1
 
     # Build per-question score examples to anchor the LLM on marks, not percentages
     score_examples = ""
@@ -137,7 +144,8 @@ async def build_cognitive_profile(payload: dict, grading_output: dict) -> dict:
     Analyzes student logic using full text context and attribute names.
     """
     questions = payload.get("questions", [])
-    rubric = payload.get("rubric", {})
+    raw_rubric = payload.get("rubric", {})
+    rubric = raw_rubric if isinstance(raw_rubric, dict) else {}
     attribute_context = rubric.get("attributeContext", "No specific attribute names provided")
 
     if questions:
