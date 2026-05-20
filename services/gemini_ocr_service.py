@@ -10,6 +10,16 @@ from utils.logger import log_error, log_info
 from services.ocr_service import _line_confidence
 
 GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
+
+
+class _GeminiOverloaded(Exception):
+    """Raised when Gemini returns 503 / UNAVAILABLE so callers can retry with a lighter model."""
+
+
+def _is_overloaded(exc: Exception) -> bool:
+    msg = str(exc)
+    return "503" in msg or "UNAVAILABLE" in msg
 
 # --- UPDATED PROMPT INSTRUCTIONS ---
 _SHARED_RULES = """\
@@ -114,14 +124,14 @@ def _pdf_bytes_to_jpeg_pages(content: bytes) -> list[tuple[bytes, int, int]]:
         raise HTTPException(status_code=500, detail=f"PDF → image conversion failed: {exc}")
 
 
-async def _call_gemini(client, img_bytes: bytes, img_mime: str) -> str:
+async def _call_gemini(client, img_bytes: bytes, img_mime: str, model: str = GEMINI_MODEL) -> str:
     """Send a single image to Gemini asynchronously and return the transcription."""
     img_bytes, img_mime = _resize_for_gemini(img_bytes)
     base64_data = base64.b64encode(img_bytes).decode("utf-8")
     try:
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model=GEMINI_MODEL,
+            model=model,
             contents=[{
                 "parts": [
                     {"inline_data": {"mime_type": img_mime, "data": base64_data}},
@@ -130,10 +140,13 @@ async def _call_gemini(client, img_bytes: bytes, img_mime: str) -> str:
             }],
         )
         text = response.text or ""
-        log_info("Gemini raw response", response=text)
+        log_info("Gemini raw response", model=model, response=text)
         return text
     except Exception as exc:
-        log_error("Gemini vision API error", error=str(exc))
+        if _is_overloaded(exc):
+            log_error("Gemini vision overloaded", model=model, error=str(exc))
+            raise _GeminiOverloaded(str(exc)) from exc
+        log_error("Gemini vision API error", model=model, error=str(exc))
         raise HTTPException(status_code=502, detail=f"Gemini vision call failed: {exc}")
 
 
@@ -146,7 +159,7 @@ def _parse_batch_response(text: str, n: int) -> list[str]:
     return results[:n]
 
 
-async def _call_gemini_batch(client, pages: list[tuple[bytes, str]]) -> list[str]:
+async def _call_gemini_batch(client, pages: list[tuple[bytes, str]], model: str = GEMINI_MODEL) -> list[str]:
     """Send all pages in a single Gemini call. Returns per-page transcription strings."""
     resized = [_resize_for_gemini(img) for img, _ in pages]
     parts = [
@@ -158,14 +171,17 @@ async def _call_gemini_batch(client, pages: list[tuple[bytes, str]]) -> list[str
     try:
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model=GEMINI_MODEL,
+            model=model,
             contents=[{"parts": parts}],
         )
         text = response.text or ""
-        log_info("Gemini batch response", pages=len(pages), chars=len(text))
+        log_info("Gemini batch response", model=model, pages=len(pages), chars=len(text))
         return _parse_batch_response(text, len(pages))
     except Exception as exc:
-        log_error("Gemini batch vision API error", error=str(exc))
+        if _is_overloaded(exc):
+            log_error("Gemini batch overloaded", model=model, error=str(exc))
+            raise _GeminiOverloaded(str(exc)) from exc
+        log_error("Gemini batch vision API error", model=model, error=str(exc))
         raise HTTPException(status_code=502, detail=f"Gemini batch vision call failed: {exc}")
 
 
@@ -186,12 +202,51 @@ def _build_regions(markdown: str, page_idx: int) -> list:
     }]
 
 
+async def _run_gemini_ocr_pass(client, file_path: str, mime_type: str, model: str) -> dict:
+    """One full Gemini OCR pass for a single file. Raises _GeminiOverloaded on 503."""
+    result_pages = []
+
+    if mime_type == "application/pdf":
+        log_info("Converting PDF to images for Gemini batch OCR", file=file_path, model=model)
+        pdf_pages = _pdf_to_jpeg_pages(file_path)
+        page_inputs = [(img_bytes, "image/jpeg") for img_bytes, _, _ in pdf_pages]
+        log_info("Sending all PDF pages in one Gemini batch call", pages=len(page_inputs), model=model)
+        transcriptions = await _call_gemini_batch(client, page_inputs, model=model)
+        for page_num, ((img_bytes, w, h), markdown) in enumerate(zip(pdf_pages, transcriptions), start=1):
+            result_pages.append({
+                "page_number": page_num,
+                "width": w,
+                "height": h,
+                "raw_markdown": markdown,
+                "regions": _build_regions(markdown, page_num),
+            })
+    else:
+        log_info("Transcribing image with Gemini vision", file=file_path, mime=mime_type, model=model)
+        with open(file_path, "rb") as f:
+            img_bytes = f.read()
+        try:
+            from PIL import Image as PILImage
+            pil_img = PILImage.open(io.BytesIO(img_bytes))
+            w, h = pil_img.width, pil_img.height
+        except Exception:
+            w, h = 0, 0
+        markdown = await _call_gemini(client, img_bytes, mime_type, model=model)
+        result_pages.append({
+            "page_number": 1,
+            "width": w,
+            "height": h,
+            "raw_markdown": markdown,
+            "regions": _build_regions(markdown, 1),
+        })
+
+    log_info("Gemini OCR complete", model=model, pages=len(result_pages))
+    return {"pages": result_pages}
+
+
 async def perform_gemini_ocr(file_path: str, mime_type: str = "image/jpeg") -> dict:
     """
     Transcribe a local image or PDF using Gemini vision.
-
-    - Single image: one async Gemini call.
-    - PDF: all pages sent in a single batch Gemini call, parsed by ===PAGE_N=== delimiters.
+    Retry chain: primary model → GEMINI_FALLBACK_MODEL on 503 → raises 502 (router falls to Mistral).
 
     Returns the same shape as perform_ocr():
         { "pages": [{ "page_number", "width", "height", "raw_markdown", "regions" }] }
@@ -209,51 +264,16 @@ async def perform_gemini_ocr(file_path: str, mime_type: str = "image/jpeg") -> d
         )
 
     client = genai.Client(api_key=api_key)
-    result_pages = []
 
-    if mime_type == "application/pdf":
-        log_info("Converting PDF to images for Gemini batch OCR", file=file_path)
-        pdf_pages = _pdf_to_jpeg_pages(file_path)
+    try:
+        return await _run_gemini_ocr_pass(client, file_path, mime_type, GEMINI_MODEL)
+    except _GeminiOverloaded:
+        log_info("Primary Gemini model overloaded — retrying with fallback model", fallback=GEMINI_FALLBACK_MODEL)
 
-        page_inputs = [(img_bytes, "image/jpeg") for img_bytes, _, _ in pdf_pages]
-        log_info("Sending all PDF pages in one Gemini batch call", pages=len(page_inputs))
-        transcriptions = await _call_gemini_batch(client, page_inputs)
-
-        for page_num, ((img_bytes, w, h), markdown) in enumerate(
-            zip(pdf_pages, transcriptions), start=1
-        ):
-            result_pages.append({
-                "page_number": page_num,
-                "width": w,
-                "height": h,
-                "raw_markdown": markdown,
-                "regions": _build_regions(markdown, page_num),
-            })
-
-    else:
-        log_info("Transcribing image with Gemini vision", file=file_path, mime=mime_type)
-        with open(file_path, "rb") as f:
-            img_bytes = f.read()
-
-        try:
-            from PIL import Image as PILImage
-            pil_img = PILImage.open(io.BytesIO(img_bytes))
-            w, h = pil_img.width, pil_img.height
-        except Exception:
-            w, h = 0, 0
-
-        markdown = await _call_gemini(client, img_bytes, mime_type)
-
-        result_pages.append({
-            "page_number": 1,
-            "width": w,
-            "height": h,
-            "raw_markdown": markdown,
-            "regions": _build_regions(markdown, 1),
-        })
-
-    log_info("Gemini OCR complete", pages=len(result_pages))
-    return {"pages": result_pages}
+    try:
+        return await _run_gemini_ocr_pass(client, file_path, mime_type, GEMINI_FALLBACK_MODEL)
+    except _GeminiOverloaded as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini overloaded on both models: {exc}")
 
 
 def _build_question_aware_prompt(questions: list) -> str:
@@ -305,10 +325,12 @@ async def _call_gemini_batch_qa(
     client,
     pages: list[tuple[bytes, str]],
     questions: list,
+    model: str = GEMINI_MODEL,
 ) -> dict | None:
     """Send all pages + question structure in one Gemini call.
     Returns parsed dict {"pages": [...], "answers": [...]} or None if the
     response cannot be parsed as JSON (caller falls back to plain batch).
+    Raises _GeminiOverloaded if the model returns 503.
     """
     resized = [_resize_for_gemini(img) for img, _ in pages]
     parts   = [
@@ -320,11 +342,11 @@ async def _call_gemini_batch_qa(
     try:
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model=GEMINI_MODEL,
+            model=model,
             contents=[{"parts": parts}],
         )
         raw = response.text or ""
-        log_info("Gemini QA batch response", pages=len(pages), chars=len(raw))
+        log_info("Gemini QA batch response", model=model, pages=len(pages), chars=len(raw))
         # Strip optional markdown code fences Gemini sometimes wraps around JSON
         clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.DOTALL)
         return json.loads(clean)
@@ -332,8 +354,59 @@ async def _call_gemini_batch_qa(
         log_error("Gemini QA response not valid JSON — falling back to plain batch", error=str(exc))
         return None
     except Exception as exc:
-        log_error("Gemini QA batch API error", error=str(exc))
-        raise HTTPException(status_code=502, detail=f"Gemini QA batch call failed: {exc}")
+        if _is_overloaded(exc):
+            log_error("Gemini QA batch overloaded", model=model, error=str(exc))
+            raise _GeminiOverloaded(str(exc)) from exc
+        log_error("Gemini QA batch API error — falling back to plain batch", model=model, error=str(exc))
+        return None
+
+
+async def _run_gemini_pass(
+    client,
+    all_pages: list,
+    page_inputs: list,
+    upload_files: list,
+    questions: list | None,
+    model: str,
+) -> dict:
+    """One full Gemini OCR pass using the given model. Raises _GeminiOverloaded on 503."""
+    if questions:
+        log_info("Attempting question-aware OCR", model=model, questions=len(questions))
+        qa = await _call_gemini_batch_qa(client, page_inputs, questions, model=model)
+        if qa is not None:
+            qa_pages = qa.get("pages", [])
+            file_results: list[list] = [[] for _ in upload_files]
+            for i, (_, _, fi, within_pi, w, h) in enumerate(all_pages):
+                md = qa_pages[i].get("transcription", "") if i < len(qa_pages) else ""
+                file_results[fi].append({
+                    "page_number": within_pi + 1,
+                    "width":       w,
+                    "height":      h,
+                    "raw_markdown": md,
+                    "regions":     _build_regions(md, within_pi),
+                })
+            log_info("Question-aware OCR complete", model=model, files=len(file_results), answers=len(qa.get("answers", [])))
+            return {
+                "files":   [{"pages": pgs} for pgs in file_results],
+                "answers": qa.get("answers", []),
+            }
+        log_info("QA JSON parse failed — falling back to plain batch OCR", model=model)
+
+    transcriptions = await _call_gemini_batch(client, page_inputs, model=model)
+
+    file_results = [[] for _ in upload_files]
+    for i, (_, _, fi, within_pi, w, h) in enumerate(all_pages):
+        markdown = transcriptions[i] if i < len(transcriptions) else ""
+        file_results[fi].append({
+            "page_number": within_pi + 1,
+            "width": w,
+            "height": h,
+            "raw_markdown": markdown,
+            "regions": _build_regions(markdown, within_pi),
+        })
+
+    log_info("Gemini batch OCR complete", model=model, files=len(file_results))
+    return {"files": [{"pages": pages} for pages in file_results]}
 
 
 async def perform_gemini_ocr_batch(
@@ -342,6 +415,7 @@ async def perform_gemini_ocr_batch(
 ) -> dict:
     """
     Transcribe multiple files (images or PDFs) in a single Gemini batch call.
+    Retry chain: primary model → GEMINI_FALLBACK_MODEL on 503 → raises 502 (router falls to Mistral).
 
     Args:
         upload_files: list of (content_bytes, mime_type, filename)
@@ -386,42 +460,12 @@ async def perform_gemini_ocr_batch(
     page_inputs = [(img, mime) for img, mime, _, _, _, _ in all_pages]
     log_info("Sending all pages in one Gemini batch call", total_pages=len(all_pages), files=len(upload_files))
 
-    # ── Question-aware path ───────────────────────────────────────────────────────
-    if questions:
-        log_info("Attempting question-aware OCR", questions=len(questions))
-        qa = await _call_gemini_batch_qa(client, page_inputs, questions)
-        if qa is not None:
-            qa_pages = qa.get("pages", [])
-            file_results: list[list] = [[] for _ in upload_files]
-            for i, (_, _, fi, within_pi, w, h) in enumerate(all_pages):
-                md = qa_pages[i].get("transcription", "") if i < len(qa_pages) else ""
-                file_results[fi].append({
-                    "page_number": within_pi + 1,
-                    "width":       w,
-                    "height":      h,
-                    "raw_markdown": md,
-                    "regions":     _build_regions(md, within_pi),
-                })
-            log_info("Question-aware OCR complete", files=len(file_results), answers=len(qa.get("answers", [])))
-            return {
-                "files":   [{"pages": pgs} for pgs in file_results],
-                "answers": qa.get("answers", []),
-            }
-        log_info("QA JSON parse failed — falling back to plain batch OCR")
+    try:
+        return await _run_gemini_pass(client, all_pages, page_inputs, upload_files, questions, GEMINI_MODEL)
+    except _GeminiOverloaded:
+        log_info("Primary Gemini model overloaded — retrying with fallback model", fallback=GEMINI_FALLBACK_MODEL)
 
-    # ── Plain batch path (no questions, or QA fallback) ───────────────────────────
-    transcriptions = await _call_gemini_batch(client, page_inputs)
-
-    file_results: list[list] = [[] for _ in upload_files]
-    for i, (_, _, fi, within_pi, w, h) in enumerate(all_pages):
-        markdown = transcriptions[i] if i < len(transcriptions) else ""
-        file_results[fi].append({
-            "page_number": within_pi + 1,
-            "width": w,
-            "height": h,
-            "raw_markdown": markdown,
-            "regions": _build_regions(markdown, within_pi),
-        })
-
-    log_info("Gemini batch OCR complete", files=len(file_results))
-    return {"files": [{"pages": pages} for pages in file_results]}
+    try:
+        return await _run_gemini_pass(client, all_pages, page_inputs, upload_files, questions, GEMINI_FALLBACK_MODEL)
+    except _GeminiOverloaded as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini overloaded on both models: {exc}")

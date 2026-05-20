@@ -34,7 +34,14 @@ async def extract_text(file: UploadFile = File(...)):
 
     try:
         if os.getenv("GEMINI_API_KEY"):
-            result = await perform_gemini_ocr(tmp_path, mime)
+            try:
+                result = await perform_gemini_ocr(tmp_path, mime)
+            except HTTPException as exc:
+                if exc.status_code not in (502, 503):
+                    raise
+                result = await perform_ocr(tmp_path, mime)
+            except Exception:
+                result = await perform_ocr(tmp_path, mime)
         else:
             result = await perform_ocr(tmp_path, mime)
     finally:
@@ -75,7 +82,14 @@ async def extract_text_batch(
             pass  # bad JSON — proceed without question-aware mapping
 
     if os.getenv("GEMINI_API_KEY"):
-        return await perform_gemini_ocr_batch(uploads, parsed_questions)
+        try:
+            return await perform_gemini_ocr_batch(uploads, parsed_questions)
+        except HTTPException as exc:
+            if exc.status_code not in (502, 503):
+                raise
+            # Gemini is unavailable — fall through to Mistral OCR
+        except Exception:
+            pass  # Gemini unreachable — fall through to Mistral OCR
 
     # Fallback: run each file individually through the non-Gemini OCR service
     results = []

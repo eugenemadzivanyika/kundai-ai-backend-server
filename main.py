@@ -1,12 +1,12 @@
 import os
-from fastapi import FastAPI
+from dotenv import load_dotenv
+load_dotenv()  # Must run before any module that reads os.getenv() at import time
+
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import bkt, developmentPlan, devplan_content_generation, health, ocr, asag, agents, content, resources, assessment_generation, ai_tutor, syllabus_extraction, rag, notes, persisted_notes, reteach
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 from middleware.error_middleware import ErrorLoggingMiddleware
-load_dotenv()  # This must run before routers are included
+from middleware.auth import require_user
 
 # List the origins you trust
 origins = [
@@ -29,20 +29,22 @@ app.add_middleware(
     allow_headers=["*"],  # Allow Content-Type, Authorization, etc.
 )
 
-app.include_router(health.router)
-app.include_router(ocr.router)
-app.include_router(asag.router)
-app.include_router(bkt.router)
-app.include_router(agents.router)
-app.include_router(developmentPlan.router)
-app.include_router(content.router)
-app.include_router(resources.router)
-app.include_router(devplan_content_generation.router)
-app.include_router(assessment_generation.router)
-app.include_router(ai_tutor.router)
-app.include_router(syllabus_extraction.router)
-app.include_router(rag.router)
-app.include_router(notes.router)
-app.include_router(persisted_notes.router)
-app.include_router(reteach.router)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+_auth = [Depends(require_user)]
+
+app.include_router(health.router)  # public — polled by the Node health check
+app.include_router(ocr.router, dependencies=_auth)
+app.include_router(asag.router, dependencies=_auth)
+app.include_router(bkt.router, dependencies=_auth)
+app.include_router(agents.router, dependencies=_auth)
+app.include_router(developmentPlan.router, dependencies=_auth)
+app.include_router(content.router, dependencies=_auth)
+app.include_router(resources.router, dependencies=_auth)
+app.include_router(devplan_content_generation.router, dependencies=_auth)
+app.include_router(assessment_generation.router, dependencies=_auth)
+app.include_router(ai_tutor.router, dependencies=_auth)
+app.include_router(syllabus_extraction.router, dependencies=_auth)
+app.include_router(rag.router, dependencies=_auth)
+app.include_router(notes.router, dependencies=_auth)
+app.include_router(persisted_notes.router, dependencies=_auth)
+app.include_router(reteach.router, dependencies=_auth)
+# /uploads is NOT mounted as public static — serve files through an authenticated endpoint instead
